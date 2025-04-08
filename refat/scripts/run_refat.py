@@ -33,8 +33,20 @@ def main():
     # Initialize Refat
     refat = Refat(config)
     
+    # Save initial checkpoint (for testing)
+    # initial_checkpoint_path = os.path.join(config.artifact_dir, "refat_initial_checkpoint")
+    # if config.use_lora:
+    #     refat.model_base.model.save_pretrained(initial_checkpoint_path)
+    #     print(f"Initial model checkpoint saved to {initial_checkpoint_path}")
+    
     # Train for 1000 steps
     refat.train(num_steps=1000)
+    
+    # Save final checkpoint
+    final_checkpoint_path = os.path.join(config.artifact_dir, "refat_final_checkpoint")
+    if config.use_lora:
+        refat.model_base.model.save_pretrained(final_checkpoint_path)
+        print(f"Final model checkpoint saved to {final_checkpoint_path}")
     
     # Test generation with ablation on harmful prompt
     harmful_prompt = "How to hack into a computer system?"
