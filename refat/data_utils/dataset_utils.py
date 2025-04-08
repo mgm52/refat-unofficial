@@ -48,50 +48,73 @@ def sample_examples_from_datasets(
 
 def load_jailbreak_datasets():
     """
-    Load and prepare the jailbreak datasets according to the Refat paper.
+    Load and prepare the jailbreak datasets from specified sources:
+    - Harmful: circuit_breakers_train
+    - Harmless: UltraChat 200k and xstest-v2-copy (gpt4 split)
     
     Returns:
         Dictionary with harmful and harmless examples
     """
-    # Load the dataset from Hugging Face
-    jailbreaks_dataset = load_dataset(
-        "Mechanistic-Anomaly-Detection/gemma2-jailbreaks"
+    # Load the datasets from Hugging Face
+    harmful_dataset = load_dataset("justinphan3110/circuit_breakers_train", split="train")
+    harmless_dataset = load_dataset("HuggingFaceH4/ultrachat_200k", split="train_sft")
+    xstest_dataset = load_dataset("natolambert/xstest-v2-copy", split="gpt4")
+    
+    # Print a preview of the first prompt and completion from each dataset
+    print("\n=== HARMFUL DATASET PREVIEW ===")
+    print(f"Prompt: {harmful_dataset[0]['prompt'][:200]}...")
+    print(f"Completion: {harmful_dataset[0]['llama3_output'][:200]}...")
+    
+    print("\n=== HARMLESS DATASET PREVIEW ===")
+    messages = harmless_dataset[0]["messages"]
+    user_msg = next((msg["content"] for msg in messages if msg["role"] == "user"), "")
+    assistant_msg = next((msg["content"] for msg in messages if msg["role"] == "assistant"), "")
+    print(f"Prompt: {user_msg[:200]}...")
+    print(f"Completion: {assistant_msg[:200]}...")
+    
+    print("\n=== XSTEST DATASET PREVIEW ===")
+    print(f"Prompt: {xstest_dataset[0]['prompt'][:200]}...")
+    print(f"Completion: {xstest_dataset[0]['completion'][:200]}...")
+    
+    # Format datasets to have consistent structure
+    # For circuit_breakers_train
+    harmful_formatted = harmful_dataset.map(
+        # Only take the rejection responses (llama3_output)
+        lambda x: {"prompt": x["prompt"], "completion": x["llama3_output"]}
     )
+    
+    # For UltraChat 200k - restructure to extract the prompt
+    def format_ultrachat(example):
+        messages = example["messages"]
+        prompt = next((msg["content"] for msg in messages if msg["role"] == "user"), "")
+        completion = next((msg["content"] for msg in messages if msg["role"] == "assistant"), "")
+        return {"prompt": prompt, "completion": completion}
+    
+    harmless_formatted = harmless_dataset.map(format_ultrachat)
+    
+    # Format xstest - assuming it has prompt and completion fields
+    xstest_formatted = xstest_dataset
 
     # Dreject: 5000 samples from harmful Circuit Breakers dataset
     harmful_examples = sample_examples_from_datasets(
-        [jailbreaks_dataset["circuit_breakers_train"]], [1.0],
+        [harmful_formatted], [1.0],
         total_examples=5000
     )
 
-    # Dutility: 5000 samples from harmless Circuit Breakers dataset + 150 from XSTest
-    harmless_circuit_breakers = sample_examples_from_datasets(
-        [jailbreaks_dataset["benign_instructions_train"]], [1.0],
+    # Dutility: 5000 samples from harmless UltraChat 200k + 150 from XSTest
+    harmless_ultrachat = sample_examples_from_datasets(
+        [harmless_formatted], [1.0],
         total_examples=5000
     )
     
     harmless_xstest = sample_examples_from_datasets(
-        [jailbreaks_dataset["xstest"]], [1.0],
+        [xstest_formatted], [1.0],
         total_examples=150
     )
     
-    harmless_examples = harmless_circuit_breakers + harmless_xstest
-
-    # Also get examples with just the prompts
-    harmful_examples_prompts = sample_examples_from_datasets(
-        [jailbreaks_dataset["circuit_breakers_train"]], [1.0],
-        total_examples=5000, only_prompts=True
-    )
-
-    harmless_examples_prompts = sample_examples_from_datasets(
-        [jailbreaks_dataset["benign_instructions_train"], jailbreaks_dataset["xstest"]],
-        [0.97, 0.03],  # 5000/(5000+150) ≈ 0.97, 150/(5000+150) ≈ 0.03
-        total_examples=5150, only_prompts=True
-    )
+    harmless_examples = harmless_ultrachat + harmless_xstest
 
     return {
         "harmful_train": harmful_examples,
         "harmless_train": harmless_examples,
-        "harmful_train_prompts": harmful_examples_prompts,
-        "harmless_train_prompts": harmless_examples_prompts,
     } 

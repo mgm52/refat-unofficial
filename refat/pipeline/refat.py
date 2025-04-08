@@ -20,7 +20,8 @@ class RefatConfig:
         refusal_layers: Union[str, List[int]] = "last_75_percent",
         steps_between_recalc: int = 4,
         samples_per_recalc: int = 32,
-        batch_size: int = 1, # TODO: consider differentiating between mean-diff-calc BS and model training BS
+        mean_diff_batch_size: int = 1, # Batch size for mean difference calculation
+        training_batch_size: int = 1, # Batch size for model training
         torch_dtype: torch.dtype = torch.float16,
         device: str = "cuda",
         rfa_probability: float = 0.5,  # Probability of applying RFA to harmful samples
@@ -39,7 +40,8 @@ class RefatConfig:
         self.refusal_layers = refusal_layers
         self.steps_between_recalc = steps_between_recalc
         self.samples_per_recalc = samples_per_recalc
-        self.batch_size = batch_size
+        self.mean_diff_batch_size = mean_diff_batch_size
+        self.training_batch_size = training_batch_size
         self.torch_dtype = torch_dtype
         self.device = device
         self.rfa_probability = rfa_probability
@@ -184,7 +186,7 @@ class Refat:
             harmful_samples,
             harmless_samples,
             self.config.artifact_dir,
-            batch_size=self.config.batch_size # this batch size doesnt affect end result, just memory vs speed
+            batch_size=self.config.mean_diff_batch_size # Batch size for mean diff calculation
         )
         
         if self.config.debug:
@@ -275,7 +277,7 @@ class Refat:
         if self.config.debug:
             print(f"Shuffled datasets: {len(harmful_samples)} harmful, {len(harmless_samples)} harmless samples")
         
-        half_batch_size = self.config.batch_size // 2
+        half_batch_size = self.config.training_batch_size // 2
         
         for step in tqdm(range(num_steps)):
             # Sample half batch from each dataset
