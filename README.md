@@ -1,6 +1,6 @@
-# ReFAT: Refusal Feature Adversarial Training (Unofficial)
+# ReFAT: Refusal Feature Adversarial Training (Unofficial) [WIP]
 
-This repository contains an unofficial implementation of the ReFAT (Refusal Feature Adversarial Training) paper. This uses Gemma 2 9B Instruct model and the Mechanistic-Anomaly-Detection/gemma2-jailbreaks dataset.
+This repository contains an unofficial implementation of the ReFAT (Refusal Feature Adversarial Training) paper. This uses Gemma 2 9B Instruct model, the Mechanistic-Anomaly-Detection/gemma2-jailbreaks dataset, and the original [refusal mediation code](https://github.com/andyrdt/refusal_direction).
 
 ## Usage
 
