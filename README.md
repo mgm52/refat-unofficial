@@ -9,7 +9,27 @@ This repository contains an unofficial implementation of the ReFAT (Refusal Feat
 ./install.sh
 
 # Run the training script
-python refat/scripts/train.py
+python -m refat.scripts.run_refat.py
+```
+
+## Using ReFAT as a Library
+
+You can install ReFAT as a library:
+
+```bash
+# Install directly from the repository
+pip install git+https://github.com/mgm52/refat-unofficial.git
+
+# Or, for development
+git clone https://github.com/mgm52/refat-unofficial.git
+cd refat-unofficial
+pip install -e .
+```
+
+The package is named `refat-unofficial` but you'll still import it using the `refat` namespace:
+
+```python
+from refat.pipeline.refat import Refat, RefatConfig
 ```
 
 ## Project Structure
