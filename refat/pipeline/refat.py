@@ -1,3 +1,4 @@
+import time
 import torch
 import random
 import numpy as np
@@ -22,10 +23,12 @@ class RefatConfig:
         samples_per_recalc: int = 32,
         mean_diff_batch_size: int = 1, # Batch size for mean difference calculation
         training_batch_size: int = 1, # Batch size for model training
+        gradient_accumulation_steps: int = 4, # Number of steps to accumulate gradients
         torch_dtype: torch.dtype = torch.float16,
         device: str = "cuda",
         rfa_probability: float = 0.5,  # Probability of applying RFA to harmful samples
         use_gradient_checkpointing: bool = False,  # Whether to use gradient checkpointing
+        use_amp: bool = True,  # Whether to use automatic mixed precision
         debug: bool = True,  # Whether to print debug information
         # LoRA parameters
         use_lora: bool = True,
@@ -42,10 +45,12 @@ class RefatConfig:
         self.samples_per_recalc = samples_per_recalc
         self.mean_diff_batch_size = mean_diff_batch_size
         self.training_batch_size = training_batch_size
+        self.gradient_accumulation_steps = gradient_accumulation_steps
         self.torch_dtype = torch_dtype
         self.device = device
         self.rfa_probability = rfa_probability
         self.use_gradient_checkpointing = use_gradient_checkpointing
+        self.use_amp = use_amp
         self.debug = debug
         self.use_lora = use_lora
         self.lora_r = lora_r
@@ -205,14 +210,10 @@ class Refat:
         Returns:
             Tuple of (model outputs, input_ids)
         """
-        if self.config.debug and step % 10 == 0:
+        if self.config.debug:
             print(f"Step {step}: Processing mixed batch of size {len(batch)} ({len(harmful_indices)} harmful)")
-            self._print_memory_usage(f"Step {step} start")
-        
-        # Check if we need to recalculate directions
-        if self._should_recalculate_directions(step):
-            self._recalculate_directions()
-        
+            #self._print_memory_usage(f"Step {step} start")
+                
         # Get refusal layers
         refusal_layers = self._get_refusal_layers()
         
@@ -237,27 +238,45 @@ class Refat:
             ]
         
         # Process batch with ablation hooks
-        inputs = self.model_base.tokenize_instructions_fn(batch)
+        inputs = self.model_base.tokenize(batch, max_length=512)
         inputs = {k: v.to(self.config.device) for k, v in inputs.items()}
         
-        if self.config.debug and step % 10 == 0:
-            print(f"Step {step}: Input shape: {inputs['input_ids'].shape}")
+        if self.config.debug:
+            print(f"Tokenized into input shape: {inputs['input_ids'].shape}")
         
         with add_hooks(module_forward_pre_hooks=ablation_hooks, module_forward_hooks=[]):
-            outputs = self.model_base.model(**inputs)
+            # Use torch.cuda.amp for mixed precision training if using cuda
+            if self.config.use_amp and torch.cuda.is_available() and self.config.torch_dtype in [torch.float16, torch.bfloat16]:
+                with torch.cuda.amp.autocast():
+                    outputs = self.model_base.model(**inputs)
+            else:
+                outputs = self.model_base.model(**inputs)
         
-        if self.config.debug and step % 10 == 0:
-            print(f"Step {step}: Output logits shape: {outputs.logits.shape}")
-            self._print_memory_usage(f"Step {step} end")
+        #if self.config.debug and step % 10 == 0:
+        #    print(f"Step {step}: Output logits shape: {outputs.logits.shape}")
+        #    self._print_memory_usage(f"Step {step} end")
         
-        return outputs, inputs["input_ids"]
+        # Only keep the necessary output for loss calculation
+        input_ids = inputs["input_ids"].detach()
+        
+        # Clear hooks and inputs to free memory
+        for module, hook in ablation_hooks:
+            if hasattr(module, '_forward_pre_hooks'):
+                # Remove the hook if it exists
+                for hook_id, hook_fn in list(module._forward_pre_hooks.items()):
+                    if hook_fn == hook:
+                        module._forward_pre_hooks.pop(hook_id, None)
+        
+        del inputs, ablation_hooks
+        
+        return outputs, input_ids
     
-    def train(self, num_steps: int = 1000):
-        """Train the model using the Refat algorithm.
-        
-        Args:
-            num_steps: Number of training steps to perform (default: 1000)
+    def train(self):
+        """Train the model using the Refat algorithm, for one epoch.
         """
+
+        num_steps = min(len(self.datasets["harmful_train"]), len(self.datasets["harmless_train"])) // (self.config.training_batch_size//2)
+
         if self.config.debug:
             print(f"Starting training for {num_steps} steps")
             self._print_memory_usage("Before training")
@@ -268,9 +287,15 @@ class Refat:
             lr=self.config.learning_rate
         )
         
+        # Initialize gradient scaler for AMP
+        scaler = torch.cuda.amp.GradScaler() if self.config.use_amp and torch.cuda.is_available() else None
+        
+        if self.config.debug:
+            print(f"Using AMP: {self.config.use_amp and torch.cuda.is_available()}")
+        
         # Shuffle datasets
-        harmful_samples = self.datasets["harmful_train"].copy()
-        harmless_samples = self.datasets["harmless_train"].copy()
+        harmful_samples = self.datasets["harmful_train"] # Could .copy() but disabling to save memory
+        harmless_samples = self.datasets["harmless_train"]
         random.shuffle(harmful_samples)
         random.shuffle(harmless_samples)
         
@@ -279,49 +304,103 @@ class Refat:
         
         half_batch_size = self.config.training_batch_size // 2
         
+        # Add accumulation steps parameter
+        accumulation_steps = self.config.gradient_accumulation_steps  # Use the parameter from config
+        actual_batch_size = max(1, self.config.training_batch_size // accumulation_steps) # bs 32 -> 32 chunks -> abs 1
+        
         for step in tqdm(range(num_steps)):
+            # Check if we need to recalculate directions
+            if self._should_recalculate_directions(step):
+                self._recalculate_directions()
+
             # Sample half batch from each dataset
-            harmful_batch = random.sample(harmful_samples, half_batch_size)
-            harmless_batch = random.sample(harmless_samples, half_batch_size)
+            harmful_batch = harmful_samples[step * half_batch_size:(step + 1) * half_batch_size]
+            harmless_batch = harmless_samples[step * half_batch_size:(step + 1) * half_batch_size]
             
-            # Combine batches and track harmful indices
+            # Combine batches
             combined_batch = harmful_batch + harmless_batch
-            harmful_indices = list(range(half_batch_size))  # Indices of harmful samples
             
-            # Perform training step
-            outputs, input_ids = self.train_step(combined_batch, step, harmful_indices)
-            
-            # Calculate conditional log likelihood loss
-            # This is the sum of log probabilities of the refusal response tokens
-            # given the input tokens
-            logits = outputs.logits
-            
-            # Shift logits and labels for next token prediction
-            shift_logits = logits[:, :-1, :].contiguous()
-            shift_labels = input_ids[:, 1:].contiguous()
-            
-            # Calculate loss (negative log likelihood)
-            loss_fct = torch.nn.CrossEntropyLoss()
-            loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
-            
-            # Backward pass
-            loss.backward()
-            
-            # Add gradient clipping
-            torch.nn.utils.clip_grad_norm_([p for p in self.model_base.model.parameters() if p.requires_grad], 1.0)
-            
-            # Update model weights
-            optimizer.step()
+            # Reset gradients at the beginning of each large batch
             optimizer.zero_grad()
+            total_loss = 0.0
             
-            if step % 100 == 0 or (self.config.debug and step % 10 == 0):
-                print(f"Step {step}, Loss: {loss.item():.4f}")
+            # Process in smaller chunks
+            for chunk_idx in range(0, len(combined_batch), actual_batch_size):
+                chunk_end = min(chunk_idx + actual_batch_size, len(combined_batch))
+                batch_chunk = combined_batch[chunk_idx:chunk_end]
+                
+                # Track harmful indices within this chunk
+                harmful_indices = [i for i in range(min(half_batch_size - chunk_idx, actual_batch_size)) 
+                                  if chunk_idx + i < half_batch_size]
+                
+                if self.config.debug:
+                    print(f"Step {step} time {time.strftime('%H:%M:%S')}, starting forward Chunk {chunk_idx//actual_batch_size}: Processing {len(batch_chunk)} samples ({len(harmful_indices)} harmful)")
+                    print(f"Harmful indices: {harmful_indices}")
+                    print(f"Batch chunk (sizes {[len(x) for x in batch_chunk]}): {batch_chunk}")
+                
+                # Skip empty chunks
+                if not batch_chunk:
+                    continue
+                    
+                # Perform forward pass on chunk
+                outputs, input_ids = self.train_step(batch_chunk, step, harmful_indices)
+                if self.config.debug:
+                    print(f"Outputs shape: {outputs.logits.shape}")
+                    print(f"Input IDs shape: {input_ids.shape}")
+                
+                # Calculate loss
+                logits = outputs.logits
+                shift_logits = logits[:, :-1, :].contiguous()
+                shift_labels = input_ids[:, 1:].contiguous()
+                loss_fct = torch.nn.CrossEntropyLoss()
+                
+                if self.config.debug:
+                    print(f"Step {step} time {time.strftime('%H:%M:%S')}, starting backward")
+
+                # Handle loss calculation and backward pass with or without AMP
+                if scaler:
+                    with torch.cuda.amp.autocast():
+                        loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+                        scaled_loss = loss / accumulation_steps
+                    
+                    # Use scaler for backward
+                    scaler.scale(scaled_loss).backward()
+                else:
+                    loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+                    scaled_loss = loss / accumulation_steps
+                    scaled_loss.backward()
+                
+                total_loss += loss.item()
+                
+                # Free up memory
+                del outputs, logits, shift_logits, shift_labels, loss, scaled_loss
+                torch.cuda.empty_cache() if torch.cuda.is_available() else None
+            
+            # Clip gradients and update parameters once per effective batch
+            if scaler:
+                # Unscale before clipping
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_([p for p in self.model_base.model.parameters() if p.requires_grad], 1.0)
+                
+                # Update weights with scaler
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                torch.nn.utils.clip_grad_norm_([p for p in self.model_base.model.parameters() if p.requires_grad], 1.0)
+                optimizer.step()
+            
+            # Report average loss
+            avg_loss = total_loss / (len(combined_batch) / actual_batch_size)
+            
+            if step % 100 == 0 or (self.config.debug):
+                print(f"Step {step}, Avg Loss: {avg_loss:.4f}")
                 if self.config.debug and step % 100 == 0:
-                    self._print_memory_usage(f"Step {step}")
+                    self._print_memory_usage(f"Step {step}, before forced gc")
                     # Force garbage collection
                     gc.collect()
                     if torch.cuda.is_available():
                         torch.cuda.empty_cache()
+                    self._print_memory_usage(f"Step {step}, after forced gc")
     
     def generate_with_ablation(self, prompt: str, max_length: int = 512) -> str:
         """Generate text with refusal direction ablation.
@@ -337,6 +416,11 @@ class Refat:
             print(f"Generating with ablation for prompt: {prompt[:50]}...")
             self._print_memory_usage("Before generation")
         
+        # Force garbage collection before generation
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            
         refusal_layers = self._get_refusal_layers()
         
         # Create ablation hooks with full ablation strength
@@ -351,7 +435,7 @@ class Refat:
         ]
         
         # Tokenize input
-        inputs = self.model_base.tokenize_instructions_fn([prompt])
+        inputs = self.model_base.tokenize([prompt])
         inputs = {k: v.to(self.config.device) for k, v in inputs.items()}
         
         if self.config.debug:
@@ -360,16 +444,42 @@ class Refat:
         # Generate with ablation hooks
         with add_hooks(module_forward_pre_hooks=ablation_hooks, module_forward_hooks=[]):
             with torch.no_grad():
-                outputs = self.model_base.model.generate(
-                    **inputs,
-                    max_length=max_length,
-                    do_sample=True,
-                    temperature=0.7,
-                    top_p=0.9
-                )
+                # Use AMP for generation if enabled
+                if self.config.use_amp and torch.cuda.is_available() and self.config.torch_dtype in [torch.float16, torch.bfloat16]:
+                    with torch.cuda.amp.autocast():
+                        outputs = self.model_base.model.generate(
+                            **inputs,
+                            max_length=max_length,
+                            do_sample=True,
+                            temperature=0.7,
+                            top_p=0.9
+                        )
+                else:
+                    outputs = self.model_base.model.generate(
+                        **inputs,
+                        max_length=max_length,
+                        do_sample=True,
+                        temperature=0.7,
+                        top_p=0.9
+                    )
         
         if self.config.debug:
             print(f"Generated output length: {len(outputs[0])}")
             self._print_memory_usage("After generation")
         
-        return self.model_base.tokenizer.decode(outputs[0], skip_special_tokens=True) 
+        result = self.model_base.tokenizer.decode(outputs[0], skip_special_tokens=True)
+        
+        # Clean up hooks
+        for module, hook in ablation_hooks:
+            if hasattr(module, '_forward_pre_hooks'):
+                for hook_id, hook_fn in list(module._forward_pre_hooks.items()):
+                    if hook_fn == hook:
+                        module._forward_pre_hooks.pop(hook_id, None)
+        
+        # Force garbage collection after generation
+        del inputs, outputs, ablation_hooks
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            
+        return result 

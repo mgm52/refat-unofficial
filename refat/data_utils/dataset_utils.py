@@ -38,7 +38,8 @@ def sample_examples_from_datasets(
             examples.extend([item["prompt"] for item in sampled])
         else:
             examples.extend(
-                [f"{item['prompt']} {item['completion']}" for item in sampled]
+                # For now, hardcoding gemma's chat template!
+                [f"<bos><start_of_turn>user\n{item['prompt']}<end_of_turn>\n<start_of_turn>model\n{item['completion']}<end_of_turn>\n" for item in sampled]
             )
 
     # Shuffle the final list to mix examples from different datasets

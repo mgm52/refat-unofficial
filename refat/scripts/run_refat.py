@@ -6,6 +6,14 @@ def main():
     # Set memory optimization environment variables
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
     
+    # Clear CUDA cache before starting
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        print(f"Available CUDA devices: {torch.cuda.device_count()}")
+        print(f"Current CUDA device: {torch.cuda.current_device()}")
+        print(f"CUDA device name: {torch.cuda.get_device_name(0)}")
+        print(f"Initial CUDA memory: {torch.cuda.memory_allocated() / 1024**2:.2f} MB allocated, {torch.cuda.memory_reserved() / 1024**2:.2f} MB reserved")
+    
     # Configuration
     config = RefatConfig(
         model_path="/workspace/gemma_2_9b_instruct",
@@ -15,10 +23,12 @@ def main():
         samples_per_recalc=32,  # Use 32 samples for direction calculation
         mean_diff_batch_size=2,  # Batch size for mean difference calculation
         training_batch_size=32,  # Batch size for model training
+        gradient_accumulation_steps=16,  # Process batch in smaller chunks
         torch_dtype=torch.float16,
         device="cuda",
         rfa_probability=0.5,  # Probability of applying RFA to harmful samples
         use_gradient_checkpointing=True,  # Enable gradient checkpointing
+        use_amp=True,  # Enable automatic mixed precision
         # LoRA parameters
         use_lora=True,
         lora_r=128,
@@ -40,8 +50,8 @@ def main():
     #     refat.model_base.model.save_pretrained(initial_checkpoint_path)
     #     print(f"Initial model checkpoint saved to {initial_checkpoint_path}")
     
-    # Train for 1000 steps
-    refat.train(num_steps=1000)
+    # Train for 1 epoch
+    refat.train()
     
     # Save final checkpoint
     final_checkpoint_path = os.path.join(config.artifact_dir, "refat_final_checkpoint")

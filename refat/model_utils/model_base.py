@@ -76,18 +76,19 @@ class ModelBase:
                 blocks.append(module)
         return blocks
     
-    def tokenize_instructions_fn(self, instructions: List[str]) -> Dict[str, torch.Tensor]:
+    def tokenize(self, strings: List[str], max_length: int = 512) -> Dict[str, torch.Tensor]:
         """Tokenize a batch of instructions."""
         return self.tokenizer(
-            instructions,
+            strings,
             padding=True,
             truncation=True,
+            max_length=max_length,
             return_tensors="pt"
         )
     
     def generate(self, prompt: str, max_length: int = 512, **kwargs) -> str:
         """Generate text from a prompt."""
-        inputs = self.tokenize_instructions_fn([prompt])
+        inputs = self.tokenize([prompt])
         inputs = {k: v.to(self.device) for k, v in inputs.items()}
         
         with torch.no_grad():
@@ -101,7 +102,7 @@ class ModelBase:
     
     def get_logits(self, prompt: str) -> torch.Tensor:
         """Get logits for a prompt."""
-        inputs = self.tokenize_instructions_fn([prompt])
+        inputs = self.tokenize([prompt])
         inputs = {k: v.to(self.device) for k, v in inputs.items()}
         
         with torch.no_grad():

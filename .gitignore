@@ -35,3 +35,8 @@ coverage.xml
 .idea/
 *.swp
 *.swo 
+
+# Extra
+*.log
+*.pt
+plot_log.py

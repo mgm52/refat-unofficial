@@ -44,7 +44,7 @@ def get_mean_activations(model, tokenizer, instructions, tokenize_instructions_f
     with torch.no_grad():
         for i in tqdm(range(0, len(instructions), batch_size)):
             #print(f"Processing mean activations for batch {i // batch_size} of {len(instructions) // batch_size} (batch_size={batch_size}, len(instructions)={len(instructions)})...")
-            inputs = tokenize_instructions_fn(instructions=instructions[i:i+batch_size])
+            inputs = tokenize_instructions_fn(strings=instructions[i:i+batch_size])
 
             with add_hooks(module_forward_pre_hooks=fwd_pre_hooks, module_forward_hooks=[]):
                 model(
@@ -130,7 +130,7 @@ def generate_directions(model_base: ModelBase, harmful_instructions, harmless_in
         model_base.tokenizer, 
         harmful_instructions, 
         harmless_instructions, 
-        model_base.tokenize_instructions_fn, 
+        model_base.tokenize, 
         model_base.model_block_modules, 
         positions=positions,
         batch_size=batch_size
